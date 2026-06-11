@@ -9,6 +9,8 @@ import logging
 import random
 import asyncio
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import defaultdict
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
@@ -1471,11 +1473,38 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  KEEP-ALIVE SERVER  — Render free tier ko sleep se rokta hai
+# ═══════════════════════════════════════════════════════════════
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Cricket Bot is alive!")
+
+    def log_message(self, format, *args):
+        pass  # server logs band karo
+
+
+def run_keep_alive():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+    logger.info(f"Keep-alive server running on port {port}")
+    server.serve_forever()
+
+
+# ═══════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Keep-alive server alag thread mein chalao (Render ke liye)
+    t = threading.Thread(target=run_keep_alive, daemon=True)
+    t.start()
+
+    # Bot token — env variable se lo (secure) ya hardcode karo
+    token = os.environ.get("BOT_TOKEN", BOT_TOKEN)
+    app = Application.builder().token(token).build()
 
     # Commands
     app.add_handler(CommandHandler("start",          cmd_start))
