@@ -86,11 +86,45 @@ def new_game(chat_id: int) -> dict:
         "out_batters":    {1: set(), 2: set()},
         # host — match ka admin
         "host":           None,   # (user_id, username)
+        # player stats for Player of the Match
+        "stats":          {},     # uid → {runs, balls_faced, wickets, balls_bowled}
     }
 
 
-def get_game(chat_id: int) -> dict | None:
-    return games.get(chat_id)
+def update_stats(g: dict, batter_uid: int, bowler_uid: int, result):
+    """Har delivery ke baad stats update karo."""
+    s = g["stats"]
+    if batter_uid not in s:
+        s[batter_uid] = {"runs": 0, "balls_faced": 0, "wickets": 0, "balls_bowled": 0}
+    if bowler_uid not in s:
+        s[bowler_uid] = {"runs": 0, "balls_faced": 0, "wickets": 0, "balls_bowled": 0}
+
+    s[batter_uid]["balls_faced"] += 1
+    s[bowler_uid]["balls_bowled"] += 1
+
+    if result == "W":
+        s[bowler_uid]["wickets"] += 1
+    else:
+        s[batter_uid]["runs"] += result
+
+
+def get_potm(g: dict) -> tuple:
+    """Sabse best player choose karo — runs + wickets*20 score se."""
+    best_uid  = None
+    best_score = -1
+    all_players = g["teams"]["A"] + g["teams"]["B"]
+
+    for uid, uname in all_players:
+        st = g["stats"].get(uid, {})
+        score = st.get("runs", 0) + st.get("wickets", 0) * 20
+        if score > best_score:
+            best_score = score
+            best_uid   = (uid, uname)
+
+    return best_uid, best_score
+
+
+
 
 
 def batting_label(g: dict) -> str:
@@ -1063,9 +1097,12 @@ async def resolve_delivery(chat_id: int, bot: Bot):
     if bat_num == bowl_num:
         result = "W"
     else:
-        result = bat_num   # batter jo daala woh runs milte hain
+        result = bat_num
 
     g["balls"][inn][bt] += 1
+
+    # Stats update
+    update_stats(g, g["batter"], g["bowler"], result)
 
     if result == "W":
         out_uid = g["batter"]   # OUT hone wale ka id save karo PEHLE
@@ -1204,8 +1241,8 @@ async def declare_winner(chat_id: int, bot: Bot):
     g = games[chat_id]
     g["phase"] = "ended"
 
-    inn1_bat = g["bowling_team"]   # bowled in inn2 = batted in inn1
-    inn2_bat = g["batting_team"]   # batted in inn2
+    inn1_bat = g["bowling_team"]
+    inn2_bat = g["batting_team"]
 
     inn1_runs = g["scores"][1][inn1_bat]
     inn2_runs = g["scores"][2][inn2_bat]
@@ -1214,22 +1251,57 @@ async def declare_winner(chat_id: int, bot: Bot):
         wkts_fallen = g["wickets"][2][inn2_bat]
         wkts_remain = max_wickets(g) - wkts_fallen
         winner_name = g["team_names"][inn2_bat]
-        msg = (
+        result_msg = (
             f"🏆 *{winner_name} wins!*\n\n"
             f"They chased {inn1_runs + 1} with {wkts_remain} wicket(s) remaining.\n\n"
         )
     elif inn1_runs > inn2_runs:
         diff = inn1_runs - inn2_runs
         winner_name = g["team_names"][inn1_bat]
-        msg = (
+        result_msg = (
             f"🏆 *{winner_name} wins!*\n\n"
             f"Won by {diff} run(s).\n\n"
         )
     else:
-        msg = "🤝 *Match tied!*\n\n"
+        result_msg = "🤝 *Match tied!*\n\n"
 
-    msg += scoreboard_text(g)
-    await bot.send_message(chat_id, msg, parse_mode="Markdown")
+    final_msg = result_msg + scoreboard_text(g)
+    await bot.send_message(chat_id, final_msg, parse_mode="Markdown")
+
+    # ── Player of the Match ──────────────────────────────────────
+    potm_data, potm_score = get_potm(g)
+    if potm_data and potm_score > 0:
+        potm_uid, potm_name = potm_data
+        st = g["stats"].get(potm_uid, {})
+        runs_scored = st.get("runs", 0)
+        wkts_taken  = st.get("wickets", 0)
+        balls_faced = st.get("balls_faced", 0)
+        balls_bowled= st.get("balls_bowled", 0)
+
+        potm_text = (
+            f"🌟 *Player of the Match*\n\n"
+            f"🏅 *{potm_name}*\n\n"
+            f"🏏 Runs: *{runs_scored}* ({balls_faced} balls)\n"
+            f"🎳 Wickets: *{wkts_taken}* ({balls_bowled} balls)\n\n"
+            f"Outstanding performance! 👏"
+        )
+
+        # Profile photo fetch karne ki koshish karo
+        try:
+            photos = await bot.get_user_profile_photos(potm_uid, limit=1)
+            if photos.total_count > 0:
+                photo = photos.photos[0][-1]  # largest size
+                await bot.send_photo(
+                    chat_id,
+                    photo=photo.file_id,
+                    caption=potm_text,
+                    parse_mode="Markdown"
+                )
+            else:
+                await bot.send_message(chat_id, potm_text, parse_mode="Markdown")
+        except Exception:
+            await bot.send_message(chat_id, potm_text, parse_mode="Markdown")
+
     del games[chat_id]
 
 
@@ -1339,6 +1411,45 @@ async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_changehost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/changehost — reply karke naya host set karo."""
+    chat_id = update.effective_chat.id
+    g = get_game(chat_id)
+    if not g:
+        await update.message.reply_text("⚠️ Koi active match nahi hai.")
+        return
+
+    user_id = update.effective_user.id
+    if not is_host(g, user_id):
+        host_name = g["host"][1] if g["host"] else "Host"
+        await update.message.reply_text(
+            f"❌ Sirf current host *{host_name}* host change kar sakta hai!",
+            parse_mode="Markdown"
+        )
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            "📝 Jisko host banana hai uske message ka reply karke `/changehost` likho.",
+            parse_mode="Markdown"
+        )
+        return
+
+    new_host_user = update.message.reply_to_message.from_user
+    new_uid       = new_host_user.id
+    new_uname     = new_host_user.username or new_host_user.first_name
+
+    old_uname = g["host"][1]
+    g["host"] = (new_uid, new_uname)
+
+    await update.message.reply_text(
+        f"👑 Host changed!\n\n"
+        f"*{old_uname}* → *{new_uname}*\n\n"
+        f"*{new_uname}* ab match ka host hai!",
+        parse_mode="Markdown"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════
 #  /changeover  — host overs change kar sakta hai mid-game
 # ═══════════════════════════════════════════════════════════════
@@ -1354,41 +1465,32 @@ async def cmd_changeover(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_host(g, user_id):
         host_name = g["host"][1] if g["host"] else "Host"
-        await update.message.reply_text(f"❌ Sirf host *{host_name}* overs change kar sakta hai!", parse_mode="Markdown")
-        return
-
-    args = ctx.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("📝 Usage: `/changeover <1-20>`\nExample: `/changeover 10`", parse_mode="Markdown")
-        return
-
-    new_overs = int(args[0])
-    if new_overs < 1 or new_overs > 20:
-        await update.message.reply_text("❌ Overs 1 se 20 ke beech hone chahiye!", parse_mode="Markdown")
-        return
-
-    # Current balls already bowled check
-    inn = g["innings"]
-    bt  = g["batting_team"] or "A"
-    balls_done = g["balls"][inn].get(bt, 0)
-    min_overs  = (balls_done // 6) + 1
-
-    if new_overs < min_overs:
         await update.message.reply_text(
-            f"❌ Already {balls_done//6} overs bowl ho chuke hain!\nKam se kam *{min_overs}* overs rakhne padenge.",
+            f"❌ Sirf host *{host_name}* overs change kar sakta hai!",
             parse_mode="Markdown"
         )
         return
 
-    old_overs = g["max_overs"]
+    args = ctx.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(
+            "📝 Usage: `/changeover <1-20>`\nExample: `/changeover 10`",
+            parse_mode="Markdown"
+        )
+        return
+
+    new_overs = int(args[0])
+    if new_overs < 1 or new_overs > 20:
+        await update.message.reply_text("❌ Overs 1 se 20 ke beech hone chahiye!")
+        return
+
+    old_overs     = g["max_overs"]
     g["max_overs"] = new_overs
     await update.message.reply_text(
         f"✅ Overs changed: *{old_overs}* → *{new_overs}*\n\n"
         f"👑 Host ne overs update kar diye!",
         parse_mode="Markdown"
     )
-
-
 
 
 async def cmd_teams(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1446,7 +1548,36 @@ async def cmd_endmatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_host(g, user_id):
         host_name = g["host"][1] if g["host"] else "Host"
-        await update.message.reply_text(f"❌ Sirf host *{host_name}* match end kar sakta hai!", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"❌ Sirf host *{host_name}* match end kar sakta hai!",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Confirm/Cancel buttons
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Confirm End", callback_data="endmatch_confirm"),
+        InlineKeyboardButton("❌ Cancel",      callback_data="endmatch_cancel"),
+    ]])
+    await update.message.reply_text(
+        "⚠️ *Kya aap match end karna chahte hain?*\n\n"
+        "Confirm End dabane se match turant band ho jaayega.",
+        reply_markup=kb, parse_mode="Markdown"
+    )
+
+
+async def cb_endmatch_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    g = get_game(chat_id)
+
+    if not g:
+        await query.edit_message_text("⚠️ Koi active match nahi hai.")
+        return
+
+    if not is_host(g, query.from_user.id):
+        await query.answer("Sirf host confirm kar sakta hai!", show_alert=True)
         return
 
     sb = scoreboard_text(g) if g["phase"] not in ["lobby", "captain", "toss", "overs"] else ""
@@ -1456,10 +1587,16 @@ async def cmd_endmatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         g["delivery_task"].cancel()
     del games[chat_id]
 
-    await update.message.reply_text(
-        f"🛑 Match ended by host *{update.effective_user.first_name}*.\n\n{sb}",
+    await query.edit_message_text(
+        f"🛑 *Match ended by host.*\n\n{sb}",
         parse_mode="Markdown"
     )
+
+
+async def cb_endmatch_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Match continue hai! ✅", show_alert=True)
+    await query.edit_message_text("✅ Match continue hai — end cancel kar diya.")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1642,6 +1779,7 @@ def main():
     app.add_handler(CommandHandler("add",            cmd_add))
     app.add_handler(CommandHandler("remove",         cmd_remove))
     app.add_handler(CommandHandler("changeover",     cmd_changeover))
+    app.add_handler(CommandHandler("changehost",     cmd_changehost))
     app.add_handler(CommandHandler("select_batter",  cmd_select_batter))
     app.add_handler(CommandHandler("select_bowler",  cmd_select_bowler))
     app.add_handler(CommandHandler("bat",            cmd_bat))
@@ -1651,7 +1789,7 @@ def main():
     app.add_handler(CommandHandler("endmatch",       cmd_endmatch))
     app.add_handler(CommandHandler("help",           cmd_help))
 
-    # Plain number input — group (batter) and DM (bowler)
+    # Plain number input
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Regex(r"^\d+$"),
         handle_number_input
@@ -1660,7 +1798,7 @@ def main():
     # Bot group mein add hone pe welcome
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_member))
 
-    # Callbacks (inline keyboards)
+    # Callbacks
     app.add_handler(CallbackQueryHandler(cb_join,               pattern=r"^join_[AB]$"))
     app.add_handler(CallbackQueryHandler(cb_force_start,        pattern=r"^force_start$"))
     app.add_handler(CallbackQueryHandler(cb_captain,            pattern=r"^cap_[AB]_\d+$"))
@@ -1670,6 +1808,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_select_batter,      pattern=r"^selbatter_\d+$"))
     app.add_handler(CallbackQueryHandler(cb_select_non_striker, pattern=r"^selnonstriker_\d+$"))
     app.add_handler(CallbackQueryHandler(cb_select_bowler,      pattern=r"^selbowler_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_endmatch_confirm,   pattern=r"^endmatch_confirm$"))
+    app.add_handler(CallbackQueryHandler(cb_endmatch_cancel,    pattern=r"^endmatch_cancel$"))
 
     logger.info("Bot started.")
     app.run_polling()
