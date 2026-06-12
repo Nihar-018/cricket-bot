@@ -91,6 +91,15 @@ def new_game(chat_id: int) -> dict:
     }
 
 
+def get_game(chat_id: int) -> dict | None:
+    return games.get(chat_id)
+
+
+def is_host(g: dict, user_id: int) -> bool:
+    """Check karo ke user host hai ya nahi."""
+    return g["host"] is not None and g["host"][0] == user_id
+
+
 def update_stats(g: dict, batter_uid: int, bowler_uid: int, result):
     """Har delivery ke baad stats update karo."""
     s = g["stats"]
@@ -207,11 +216,6 @@ def scoreboard_text(g: dict) -> str:
         lines.append(f"🎯 Target: {g['target']} | Need: {need} more runs")
 
     return "\n".join(lines)
-
-
-def is_host(g: dict, user_id: int) -> bool:
-    """Check karo ke user host hai ya nahi."""
-    return g["host"] is not None and g["host"][0] == user_id
 
 
 # ═══════════════════════════════════════════════════════════════
