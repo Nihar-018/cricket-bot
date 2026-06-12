@@ -763,14 +763,14 @@ async def prompt_delivery(chat_id: int, bot: Bot):
     batter_data = next(u for u in g["teams"][g["batting_team"]] if u[0] == batter_uid)
     bowler_data = next(u for u in g["teams"][g["bowling_team"]] if u[0] == bowler_uid)
 
-    # Tag format: [Name](tg://user?id=USER_ID)
-    batter_tag = f"[{batter_data[1]}](tg://user?id={batter_data[0]})"
-    bowler_tag = f"[{bowler_data[1]}](tg://user?id={bowler_data[0]})"
+    # HTML mention tags — ye Telegram mein user ko tag karta hai
+    batter_tag = f'<a href="tg://user?id={batter_data[0]}">{batter_data[1]}</a>'
+    bowler_tag = f'<a href="tg://user?id={bowler_data[0]}">{bowler_data[1]}</a>'
 
     target_txt = ""
     if g["innings"] == 2 and g["target"]:
         need = g["target"] - runs
-        target_txt = f"\n🎯 Need: {need} runs | Target: {g['target']}"
+        target_txt = f"\n🎯 Need: <b>{need}</b> runs | Target: <b>{g['target']}</b>"
 
     bot_info     = await bot.get_me()
     bot_username = bot_info.username
@@ -784,14 +784,14 @@ async def prompt_delivery(chat_id: int, bot: Bot):
 
     await bot.send_message(
         chat_id,
-        f"🏏 *{bt_name}* {runs}/{wkts} ({ov} ov){target_txt}\n\n"
+        f"🏏 <b>{bt_name}</b> {runs}/{wkts} ({ov} ov){target_txt}\n\n"
         f"⚡ Striker: {batter_tag}\n"
         f"🎯 Bowler: {bowler_tag}\n\n"
-        f"*Step 1️⃣ —* {bowler_tag} 👇 Button dabao → DM mein *1\\-6* type karo\n"
-        f"*Step 2️⃣ —* {batter_tag} group mein sirf *0\\-6* number type karo\n\n"
-        f"💡 Same number = *WICKET\\!* \\| Alag = batter ke runs\n"
-        f"⏳ *{DELIVERY_TIMEOUT//60} min* mein respond karo warna OUT \\+ \\-{PENALTY_RUNS} penalty\\!",
-        parse_mode="MarkdownV2",
+        f"<b>Step 1️⃣</b> — {bowler_tag} 👇 Button dabao → DM mein <b>1-6</b> type karo\n"
+        f"<b>Step 2️⃣</b> — {batter_tag} group mein sirf <b>0-6</b> number type karo\n\n"
+        f"💡 Same number = <b>WICKET!</b> | Alag = batter ke runs\n"
+        f"⏳ <b>{DELIVERY_TIMEOUT//60} min</b> mein respond karo warna OUT + -{PENALTY_RUNS} penalty!",
+        parse_mode="HTML",
         reply_markup=kb
     )
     g["waiting_for"] = "both"
@@ -930,12 +930,12 @@ async def handle_number_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
              if u[0] == target_game["batter"]), None
         )
         if batter_data:
-            batter_tag = f"[{batter_data[1]}](tg://user?id={batter_data[0]})"
+            batter_tag = f'<a href="tg://user?id={batter_data[0]}">{batter_data[1]}</a>'
             await ctx.bot.send_message(
                 chat_id,
-                f"🎯 *Bowler ne bowl kar diya\\!*\n\n"
-                f"⚡ {batter_tag} — ab apna number type karo \\(0\\-6\\)\\!",
-                parse_mode="MarkdownV2"
+                f"🎯 <b>Bowler ne bowl kar diya!</b>\n\n"
+                f"⚡ {batter_tag} — ab apna number type karo (0-6)!",
+                parse_mode="HTML"
             )
         return
 
@@ -1120,8 +1120,8 @@ async def resolve_delivery(chat_id: int, bot: Bot):
             g["batter"], g["non_striker"] = g["non_striker"], g["batter"]
             new_striker_data = next((u for u in g["teams"][bt] if u[0] == g["batter"]), None)
             if new_striker_data:
-                new_striker_tag = f"[{new_striker_data[1]}](tg://user?id={new_striker_data[0]})"
-                strike_note = f"\n🔄 Strike change\\! {new_striker_tag} now on strike"
+                new_striker_tag = f'<a href="tg://user?id={new_striker_data[0]}">{new_striker_data[1]}</a>'
+                strike_note = f"\n🔄 Strike change! {new_striker_tag} now on strike"
             else:
                 strike_note = ""
         else:
@@ -1129,10 +1129,10 @@ async def resolve_delivery(chat_id: int, bot: Bot):
         emoji = "🏃" if result > 0 else "🛡️"
         await bot.send_message(
             chat_id,
-            f"{emoji} *{result} run{'s' if result != 1 else ''}\\!*\n\n"
-            f"Batter: *{bat_num}* \\| Bowler: *{bowl_num}*\n"
-            f"📊 {g['team_names'][bt]}: {runs}/{wkts} \\({ov} ov\\){strike_note}",
-            parse_mode="MarkdownV2"
+            f"{emoji} <b>{result} run{'s' if result != 1 else ''}!</b>\n\n"
+            f"Batter: <b>{bat_num}</b> | Bowler: <b>{bowl_num}</b>\n"
+            f"📊 {g['team_names'][bt]}: {runs}/{wkts} ({ov} ov){strike_note}",
+            parse_mode="HTML"
         )
 
     # check innings over
