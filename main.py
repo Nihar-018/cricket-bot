@@ -84,6 +84,8 @@ def new_game(chat_id: int) -> dict:
         "delivery_task":  None,   # 2-min shot/bowl timeout task
         # out players per innings — inn → set of user_ids
         "out_batters":    {1: set(), 2: set()},
+        # host — match ka admin
+        "host":           None,   # (user_id, username)
     }
 
 
@@ -173,6 +175,11 @@ def scoreboard_text(g: dict) -> str:
     return "\n".join(lines)
 
 
+def is_host(g: dict, user_id: int) -> bool:
+    """Check karo ke user host hai ya nahi."""
+    return g["host"] is not None and g["host"][0] == user_id
+
+
 # ═══════════════════════════════════════════════════════════════
 #  LOBBY PHASE
 # ═══════════════════════════════════════════════════════════════
@@ -183,16 +190,22 @@ async def cmd_startmatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ A match is already running. Use /endmatch first.")
         return
 
-    g = new_game(chat_id)
+    user    = update.effective_user
+    g       = new_game(chat_id)
     games[chat_id] = g
 
+    # /startmatch karne wala automatically host ban jaata hai
+    g["host"] = (user.id, user.username or user.first_name)
+
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏏 Join Team A", callback_data="join_A"),
-         InlineKeyboardButton("🏏 Join Team B", callback_data="join_B")],
+        [InlineKeyboardButton("🔵 Join Team A", callback_data="join_A"),
+         InlineKeyboardButton("🔴 Join Team B", callback_data="join_B")],
         [InlineKeyboardButton("✅ Start Match", callback_data="force_start")]
     ])
     msg = await update.message.reply_text(
-        "🏟️ *Cricket Match Lobby*\n\nJoin a team! Match starts in *2 minutes* or when started manually.",
+        f"🏟️ *Cricket Match Lobby*\n\n"
+        f"👑 Host: *{user.username or user.first_name}*\n\n"
+        f"Join a team! Match starts in *2 minutes* or when started manually.",
         reply_markup=kb, parse_mode="Markdown"
     )
     g["join_msg_id"] = msg.message_id
@@ -218,8 +231,10 @@ async def update_lobby_message(g: dict, bot: Bot):
     a_str = ", ".join(a_names) if a_names else "—"
     b_str = ", ".join(b_names) if b_names else "—"
 
+    host_name = g["host"][1] if g["host"] else "—"
     text = (
-        f"🏟️ *Cricket Match Lobby*\n\n"
+        f"🏟️ *Cricket Match Lobby*\n"
+        f"👑 Host: *{host_name}*\n\n"
         f"🔵 *Team A* ({len(a_names)} players)\n{a_str}\n\n"
         f"🔴 *Team B* ({len(b_names)} players)\n{b_str}\n\n"
         f"⏳ Match starts in 2 min or click ✅ Start Match"
@@ -742,22 +757,27 @@ async def prompt_delivery(chat_id: int, bot: Bot):
     runs, wkts, balls = current_score(g)
     ov = f"{balls//6}.{balls%6}"
     bt_name = g["team_names"][g["batting_team"]]
-    batter_name = next(u[1] for u in g["teams"][g["batting_team"]] if u[0] == g["batter"])
-    bowler_name = next(u[1] for u in g["teams"][g["bowling_team"]] if u[0] == g["bowler"])
+
+    batter_uid  = g["batter"]
+    bowler_uid  = g["bowler"]
+    batter_data = next(u for u in g["teams"][g["batting_team"]] if u[0] == batter_uid)
+    bowler_data = next(u for u in g["teams"][g["bowling_team"]] if u[0] == bowler_uid)
+
+    # Tag format: [Name](tg://user?id=USER_ID)
+    batter_tag = f"[{batter_data[1]}](tg://user?id={batter_data[0]})"
+    bowler_tag = f"[{bowler_data[1]}](tg://user?id={bowler_data[0]})"
 
     target_txt = ""
     if g["innings"] == 2 and g["target"]:
         need = g["target"] - runs
         target_txt = f"\n🎯 Need: {need} runs | Target: {g['target']}"
 
-    # Bot ka username fetch karo (DM link ke liye)
-    bot_info = await bot.get_me()
+    bot_info     = await bot.get_me()
     bot_username = bot_info.username
 
-    # "Bowl Now" button — click karne pe bot ka DM open hoga
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton(
-            f"🎯 Bowl Now — {bowler_name}",
+            f"🎯 Bowl Now — {bowler_data[1]}",
             url=f"https://t.me/{bot_username}?start=bowl"
         )
     ]])
@@ -765,24 +785,22 @@ async def prompt_delivery(chat_id: int, bot: Bot):
     await bot.send_message(
         chat_id,
         f"🏏 *{bt_name}* {runs}/{wkts} ({ov} ov){target_txt}\n\n"
-        f"⚡ Striker: *{batter_name}*\n"
-        f"🎯 Bowler: *{bowler_name}*\n\n"
-        f"*Step 1️⃣ — Bowler* 👇 Button dabao → DM mein *1-6* type karo\n"
-        f"*Step 2️⃣ — Batter* group mein sirf *0-6* number type karo\n\n"
-        f"💡 Same number = *WICKET!* | Alag = batter ke runs\n"
-        f"⏳ *{DELIVERY_TIMEOUT//60} min* mein respond karo warna OUT + -{PENALTY_RUNS} penalty!",
-        parse_mode="Markdown",
+        f"⚡ Striker: {batter_tag}\n"
+        f"🎯 Bowler: {bowler_tag}\n\n"
+        f"*Step 1️⃣ —* {bowler_tag} 👇 Button dabao → DM mein *1\\-6* type karo\n"
+        f"*Step 2️⃣ —* {batter_tag} group mein sirf *0\\-6* number type karo\n\n"
+        f"💡 Same number = *WICKET\\!* \\| Alag = batter ke runs\n"
+        f"⏳ *{DELIVERY_TIMEOUT//60} min* mein respond karo warna OUT \\+ \\-{PENALTY_RUNS} penalty\\!",
+        parse_mode="MarkdownV2",
         reply_markup=kb
     )
     g["waiting_for"] = "both"
     g["shot_choice"]  = None
     g["bowler_choice"]= None
 
-    # cancel any previous delivery timer
     if g.get("delivery_task") and not g["delivery_task"].done():
         g["delivery_task"].cancel()
 
-    # start fresh 2-min timeout
     g["delivery_task"] = asyncio.create_task(
         delivery_timeout(chat_id, bot)
     )
@@ -907,16 +925,18 @@ async def handle_number_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # Group mein batter ko notify karo
         chat_id     = target_game["chat_id"]
-        batter_name = next(
-            (u[1] for u in target_game["teams"][target_game["batting_team"]]
-             if u[0] == target_game["batter"]), "Batter"
+        batter_data = next(
+            (u for u in target_game["teams"][target_game["batting_team"]]
+             if u[0] == target_game["batter"]), None
         )
-        await ctx.bot.send_message(
-            chat_id,
-            f"🎯 *Bowler ne bowl kar diya!*\n\n"
-            f"⚡ *{batter_name}* — ab apna number type karo (0-6)!",
-            parse_mode="Markdown"
-        )
+        if batter_data:
+            batter_tag = f"[{batter_data[1]}](tg://user?id={batter_data[0]})"
+            await ctx.bot.send_message(
+                chat_id,
+                f"🎯 *Bowler ne bowl kar diya\\!*\n\n"
+                f"⚡ {batter_tag} — ab apna number type karo \\(0\\-6\\)\\!",
+                parse_mode="MarkdownV2"
+            )
         return
 
     # ── Group mein batter ka input ───────────────────────────
@@ -1098,17 +1118,21 @@ async def resolve_delivery(chat_id: int, bot: Bot):
         strike_changed = result in [1, 2, 3, 5] and result % 2 == 1
         if strike_changed:
             g["batter"], g["non_striker"] = g["non_striker"], g["batter"]
-            new_striker = next((u[1] for u in g["teams"][bt] if u[0] == g["batter"]), "—")
-            strike_note = f"\n🔄 Strike change! *{new_striker}* now on strike"
+            new_striker_data = next((u for u in g["teams"][bt] if u[0] == g["batter"]), None)
+            if new_striker_data:
+                new_striker_tag = f"[{new_striker_data[1]}](tg://user?id={new_striker_data[0]})"
+                strike_note = f"\n🔄 Strike change\\! {new_striker_tag} now on strike"
+            else:
+                strike_note = ""
         else:
             strike_note = ""
         emoji = "🏃" if result > 0 else "🛡️"
         await bot.send_message(
             chat_id,
-            f"{emoji} *{result} run{'s' if result != 1 else ''}!*\n\n"
-            f"Batter: *{bat_num}* | Bowler: *{bowl_num}*\n"
-            f"📊 {g['team_names'][bt]}: {runs}/{wkts} ({ov} ov){strike_note}",
-            parse_mode="Markdown"
+            f"{emoji} *{result} run{'s' if result != 1 else ''}\\!*\n\n"
+            f"Batter: *{bat_num}* \\| Bowler: *{bowl_num}*\n"
+            f"📊 {g['team_names'][bt]}: {runs}/{wkts} \\({ov} ov\\){strike_note}",
+            parse_mode="MarkdownV2"
         )
 
     # check innings over
@@ -1214,14 +1238,19 @@ async def declare_winner(chat_id: int, bot: Bot):
 # ═══════════════════════════════════════════════════════════════
 
 async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/add a  ya  /add b — jiske message ka reply ho woh us team mein join ho jaata hai."""
+    """/add a  ya  /add b — host kisi ko bhi kisi team mein add kar sakta hai."""
     chat_id = update.effective_chat.id
     g = get_game(chat_id)
     if not g:
-        await update.message.reply_text("⚠️ Koi active match nahi hai. Pehle /startmatch karo.")
+        await update.message.reply_text("⚠️ Koi active match nahi hai.")
         return
-    if g["phase"] != "lobby":
-        await update.message.reply_text("⚠️ Lobby already band ho gayi. Join phase khatam.")
+
+    user_id = update.effective_user.id
+
+    # Lobby mein koi bhi join kar sakta hai, game ke beech mein sirf host
+    if g["phase"] != "lobby" and not is_host(g, user_id):
+        host_name = g["host"][1] if g["host"] else "Host"
+        await update.message.reply_text(f"❌ Game ke beech mein sirf host *{host_name}* players add kar sakta hai!", parse_mode="Markdown")
         return
 
     args = ctx.args
@@ -1231,28 +1260,28 @@ async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     team = args[0].upper()
 
-    # Reply wala user join karega
     if update.message.reply_to_message:
         target_user = update.message.reply_to_message.from_user
     else:
-        # Koi reply nahi — command sender khud join karta hai
         target_user = update.effective_user
 
-    user_id  = target_user.id
+    uid      = target_user.id
     username = target_user.username or target_user.first_name
     other    = "B" if team == "A" else "A"
 
-    # Agar pehle se doosri team mein hai toh nikalo
-    if user_id in g["joined"]:
-        prev = g["joined"][user_id]
+    if uid in g["joined"]:
+        prev = g["joined"][uid]
         if prev == team:
             await update.message.reply_text(f"⚠️ *{username}* pehle se Team {team} mein hai!", parse_mode="Markdown")
             return
-        g["teams"][prev] = [(u, n) for u, n in g["teams"][prev] if u != user_id]
+        g["teams"][prev] = [(u, n) for u, n in g["teams"][prev] if u != uid]
 
-    g["joined"][user_id] = team
-    g["teams"][team].append((user_id, username))
-    await update_lobby_message(g, ctx.bot)
+    g["joined"][uid] = team
+    g["teams"][team].append((uid, username))
+
+    if g["phase"] == "lobby":
+        await update_lobby_message(g, ctx.bot)
+
     await update.message.reply_text(
         f"✅ *{username}* Team *{team}* ({g['team_names'][team]}) mein add ho gaya!",
         parse_mode="Markdown"
@@ -1260,8 +1289,107 @@ async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  /teams  — dono teams ke players dikhao
+#  /remove  — host kisi ko team se remove kar sakta hai
 # ═══════════════════════════════════════════════════════════════
+
+async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/remove — host kisi ke message ka reply karke use team se nikalta hai."""
+    chat_id = update.effective_chat.id
+    g = get_game(chat_id)
+    if not g:
+        await update.message.reply_text("⚠️ Koi active match nahi hai.")
+        return
+
+    user_id = update.effective_user.id
+    if not is_host(g, user_id):
+        host_name = g["host"][1] if g["host"] else "Host"
+        await update.message.reply_text(f"❌ Sirf host *{host_name}* players remove kar sakta hai!", parse_mode="Markdown")
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("📝 Jis player ko remove karna hai uske message ka reply karke `/remove` likho.", parse_mode="Markdown")
+        return
+
+    target_user = update.message.reply_to_message.from_user
+    uid         = target_user.id
+    username    = target_user.username or target_user.first_name
+
+    if uid not in g["joined"]:
+        await update.message.reply_text(f"⚠️ *{username}* kisi bhi team mein nahi hai.", parse_mode="Markdown")
+        return
+
+    team = g["joined"][uid]
+    g["teams"][team] = [(u, n) for u, n in g["teams"][team] if u != uid]
+    del g["joined"][uid]
+
+    # Agar current batter/bowler/striker tha toh reset karo
+    if g.get("batter") == uid:
+        g["batter"] = None
+    if g.get("non_striker") == uid:
+        g["non_striker"] = None
+    if g.get("bowler") == uid:
+        g["bowler"] = None
+
+    if g["phase"] == "lobby":
+        await update_lobby_message(g, ctx.bot)
+
+    await update.message.reply_text(
+        f"🗑️ *{username}* ko Team *{team}* se remove kar diya gaya.",
+        parse_mode="Markdown"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  /changeover  — host overs change kar sakta hai mid-game
+# ═══════════════════════════════════════════════════════════════
+
+async def cmd_changeover(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/changeover 10 — host match ke beech mein overs change kar sakta hai."""
+    chat_id = update.effective_chat.id
+    g = get_game(chat_id)
+    if not g:
+        await update.message.reply_text("⚠️ Koi active match nahi hai.")
+        return
+
+    user_id = update.effective_user.id
+    if not is_host(g, user_id):
+        host_name = g["host"][1] if g["host"] else "Host"
+        await update.message.reply_text(f"❌ Sirf host *{host_name}* overs change kar sakta hai!", parse_mode="Markdown")
+        return
+
+    args = ctx.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("📝 Usage: `/changeover <1-20>`\nExample: `/changeover 10`", parse_mode="Markdown")
+        return
+
+    new_overs = int(args[0])
+    if new_overs < 1 or new_overs > 20:
+        await update.message.reply_text("❌ Overs 1 se 20 ke beech hone chahiye!", parse_mode="Markdown")
+        return
+
+    # Current balls already bowled check
+    inn = g["innings"]
+    bt  = g["batting_team"] or "A"
+    balls_done = g["balls"][inn].get(bt, 0)
+    min_overs  = (balls_done // 6) + 1
+
+    if new_overs < min_overs:
+        await update.message.reply_text(
+            f"❌ Already {balls_done//6} overs bowl ho chuke hain!\nKam se kam *{min_overs}* overs rakhne padenge.",
+            parse_mode="Markdown"
+        )
+        return
+
+    old_overs = g["max_overs"]
+    g["max_overs"] = new_overs
+    await update.message.reply_text(
+        f"✅ Overs changed: *{old_overs}* → *{new_overs}*\n\n"
+        f"👑 Host ne overs update kar diye!",
+        parse_mode="Markdown"
+    )
+
+
+
 
 async def cmd_teams(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1312,20 +1440,13 @@ async def cmd_endmatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     g = get_game(chat_id)
     if not g:
-        await update.message.reply_text("No active match to end.")
+        await update.message.reply_text("⚠️ Koi active match nahi hai.")
         return
 
-    # only captains or admins
     user_id = update.effective_user.id
-    cap_ids = []
-    if g["captains"]["A"]:
-        cap_ids.append(g["captains"]["A"][0])
-    if g["captains"]["B"]:
-        cap_ids.append(g["captains"]["B"][0])
-    all_ids = [u[0] for u in g["teams"]["A"]] + [u[0] for u in g["teams"]["B"]]
-
-    if user_id not in all_ids:
-        await update.message.reply_text("Only match participants can end the match.")
+    if not is_host(g, user_id):
+        host_name = g["host"][1] if g["host"] else "Host"
+        await update.message.reply_text(f"❌ Sirf host *{host_name}* match end kar sakta hai!", parse_mode="Markdown")
         return
 
     sb = scoreboard_text(g) if g["phase"] not in ["lobby", "captain", "toss", "overs"] else ""
@@ -1336,7 +1457,7 @@ async def cmd_endmatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     del games[chat_id]
 
     await update.message.reply_text(
-        f"🛑 Match ended by {update.effective_user.first_name}.\n\n{sb}",
+        f"🛑 Match ended by host *{update.effective_user.first_name}*.\n\n{sb}",
         parse_mode="Markdown"
     )
 
@@ -1346,21 +1467,30 @@ async def cmd_endmatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 
 WELCOME_TEXT = (
-    "🏏 *Welcome to Cricket Dosti!*\n\n"
-    "A fun-filled Cricket Game Bot\n"
-    "*Play, Win & Have Fun Together!*\n\n"
+    "🏏 *Welcome to Cricket Dosti\\!*\n\n"
+    "A fun\\-filled Cricket Game Bot\n"
+    "*Play, Win & Have Fun Together\\!*\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
-    "📋 *Commands:*\n"
-    "*/startmatch* — Naya match shuru karo\n"
-    "*/select\\_batter* — Batter choose karo\n"
-    "*/select\\_bowler* — Bowler choose karo\n"
-    "*/shot* — Shot khelo (group mein)\n"
-    "*/bowl* — Bowl karo *(DM mein bhejna!)*\n"
-    "*/score* — Scorecard dekho\n"
-    "*/endmatch* — Match band karo\n"
-    "*/help* — Help dekho\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "🎯 Type /startmatch to begin!"
+    "📋 *Commands:*\n\n"
+    "🏟️ /startmatch — Naya match shuru karo\n"
+    "👥 /teams — Dono teams dekho\n"
+    "📊 /score — Live scorecard dekho\n"
+    "➕ /add a or b — Player ko team mein add karo\n"
+    "❌ /remove — Player ko team se hatao\n"
+    "🔄 /changeover — Overs change karo\n"
+    "🏏 /select\\_batter — Striker choose karo\n"
+    "🎳 /select\\_bowler — Bowler choose karo\n"
+    "🛑 /endmatch — Match band karo \\(sirf host\\)\n"
+    "❓ /help — Help dekho\n\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "🎮 *Kaise khele:*\n\n"
+    "1️⃣ Bowler 👉 Bowl Now button dabao → DM mein *1\\-6* type karo\n"
+    "2️⃣ Batter 👉 Group mein *0\\-6* number type karo\n\n"
+    "💡 Same number = *WICKET\\!*\n"
+    "💡 Alag number = Batter ke runs\\!\n"
+    "💡 1,3,5 runs = Strike change 🔄\n\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "🎯 Type /startmatch to begin\\!"
 )
 
 
@@ -1390,13 +1520,13 @@ async def send_welcome(chat_id: int, bot: Bot):
                     chat_id=chat_id,
                     photo=img,
                     caption=WELCOME_TEXT,
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
         else:
-            await bot.send_message(chat_id, WELCOME_TEXT, parse_mode="Markdown")
+            await bot.send_message(chat_id, WELCOME_TEXT, parse_mode="MarkdownV2")
     except Exception as e:
         logger.warning(f"Welcome image send failed: {e}")
-        await bot.send_message(chat_id, WELCOME_TEXT, parse_mode="Markdown")
+        await bot.send_message(chat_id, WELCOME_TEXT, parse_mode="MarkdownV2")
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1510,6 +1640,8 @@ def main():
     app.add_handler(CommandHandler("start",          cmd_start))
     app.add_handler(CommandHandler("startmatch",     cmd_startmatch))
     app.add_handler(CommandHandler("add",            cmd_add))
+    app.add_handler(CommandHandler("remove",         cmd_remove))
+    app.add_handler(CommandHandler("changeover",     cmd_changeover))
     app.add_handler(CommandHandler("select_batter",  cmd_select_batter))
     app.add_handler(CommandHandler("select_bowler",  cmd_select_bowler))
     app.add_handler(CommandHandler("bat",            cmd_bat))
